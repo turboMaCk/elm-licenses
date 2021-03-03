@@ -24,9 +24,9 @@ import Node.Encoding (Encoding(..))
 import Simple.JSON as JSON
 import Foreign.Keys (keys) as Foreign
 import Foreign (readString, fail) as Foreign
-import Foreign (ForeignError(..))
+import Foreign (ForeignError(..), MultipleErrors)
 import Foreign.Index (readProp) as Foreign
-import Data.Either (Either(..))
+import Data.Either (Either, either)
 
 type Config =
   { elmHome :: String
@@ -73,8 +73,7 @@ newtype Deps =
 derive newtype instance showDeps :: Show Deps
 
 unDeps :: Deps -> Array Dep
-unDeps (Deps xs) =
-  xs
+unDeps (Deps xs) = xs
 
 type AppMetaRaw =
   { "elm-version" :: ElmVersion
@@ -114,13 +113,8 @@ getAppMeta :: Config -> Aff AppMetaRaw
 getAppMeta config = do
     elmJSON <- FS.readTextFile UTF8 $ config.path <> "/elm.json"
 
-    -- TODO: use `either` function
-    case JSON.readJSON elmJSON of
-      Right (r :: AppMetaRaw) -> do
-        pure r
-
-      Left e ->
-        Aff.throwError $ Aff.error $ "Can't read elm.json file\n\n" <> show e
+    either (Aff.throwError <<< Aff.error <<< ((<>) "Can't read elm.json file\n\n") <<< show) pure $
+           JSON.readJSON elmJSON
 
 getPackageJson :: Config -> ElmVersion -> Dep -> Aff FilePath
 getPackageJson config elmVersion dep =
@@ -129,15 +123,15 @@ getPackageJson config elmVersion dep =
     packagePath =
       getPackagePath config elmVersion dep
 
-getDeps :: Config -> ElmVersion -> Deps -> Aff (Array FilePath)
+getDeps :: Config -> ElmVersion -> Deps -> Aff (Array (Either MultipleErrors Package))
 getDeps config elmVersion deps =
-  for (unDeps deps) $
-        getPackageJson config elmVersion
+  for (unDeps deps) $ \dep -> do
+          f <- getPackageJson config elmVersion dep
+          pure $ JSON.readJSON f
 
 main :: Effect (Fiber Unit)
 main = do
   config <- initConfig
-  Console.log $ show config
 
   Aff.launchAff do
     elmJSON <- FS.readTextFile UTF8 $ config.path <> "/elm.json"
@@ -147,20 +141,12 @@ main = do
     direct <- getDeps config elmVersion app.dependencies.direct
     indirect <- getDeps config elmVersion app.dependencies.indirect
 
-    liftEffect $ Console.log "\nDIRECT:"
-    for_ direct $ \file ->
-        liftEffect $ case JSON.readJSON file of
-          Right (package :: Package) ->
-            Console.log $ show package
+    for_ direct $ printRes
+    for_ indirect printRes
 
-          Left e ->
-            Console.log $ "err reading json: " <> show e
-
-    liftEffect $ Console.log "\nINDIRECT:"
-    for_ indirect $ \file ->
-        liftEffect $ case JSON.readJSON file of
-          Right (package :: Package) ->
-            Console.log $ show package
-
-          Left e ->
-            Console.log $ "err reading json: " <> show e
+  where
+    printRes i =
+      liftEffect $ either
+        (\e -> Console.log $ "Error reading package " <> show e)
+        (\p -> Console.log $ p.name <> " " <> p.version <> " " <> p.license)
+        i

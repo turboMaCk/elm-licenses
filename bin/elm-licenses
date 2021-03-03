@@ -1,4 +1,0 @@
-#! /usr/bin/env node
-
-const ps = require('../index.js');
-ps.main();
