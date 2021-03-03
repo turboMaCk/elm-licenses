@@ -15,7 +15,6 @@ You can edit this file as you like.
   , "node-process"
   , "psci-support"
   , "simple-json"
-  , "unordered-collections"
   , "generics-rep"
   , "foreign"
   , "foldable-traversable"

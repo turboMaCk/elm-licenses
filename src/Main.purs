@@ -2,16 +2,17 @@ module Main where
 
 import Prelude
 
-import Data.Generic.Rep as GR
-import Data.Traversable
+import Data.Traversable (for)
+import Data.Foldable (for_)
 import Effect (Effect)
 import Data.Generic.Rep (class Generic)
 import Data.Generic.Rep.Show (genericShow)
--- import Data.HashMap (HashMap)
--- import Data.HashMap as HashMap
 import Effect.Console as Console
 import Node.Process as Process
 import Data.Maybe as Maybe
+import Data.Maybe (Maybe(..))
+import Data.String.Common as String
+import Data.String.Pattern (Pattern(..))
 import Effect.Aff (Fiber, Aff)
 import Effect.Aff as Aff
 import Node.Path as Path
@@ -21,9 +22,10 @@ import Node.FS.Aff as FS
 import Effect.Class (liftEffect)
 import Node.Encoding (Encoding(..))
 import Simple.JSON as JSON
-import Foreign.Keys as Foreign
-import Foreign as Foreign
-import Foreign.Index as Foreign
+import Foreign.Keys (keys) as Foreign
+import Foreign (readString, fail) as Foreign
+import Foreign (ForeignError(..))
+import Foreign.Index (readProp) as Foreign
 import Data.Either (Either(..))
 
 type Config =
@@ -51,13 +53,6 @@ type Package =
   , version :: String
   }
 
-type PackageMeta =
-  { name :: String
-  , author :: String
-  -- TODO: better version
-  , version :: String
-  }
-
 newtype ElmVersion =
   ElmVersion String
 derive newtype instance showElmVersion :: Show ElmVersion
@@ -65,6 +60,7 @@ derive newtype instance readForeignElmVersion :: JSON.ReadForeign ElmVersion
 
 data Dep = Dep
     { name :: String
+    , author :: String
     , version :: String
     }
 derive instance genericDep :: Generic Dep _
@@ -75,6 +71,10 @@ instance showDep :: Show Dep where
 newtype Deps =
   Deps (Array Dep)
 derive newtype instance showDeps :: Show Deps
+
+unDeps :: Deps -> Array Dep
+unDeps (Deps xs) =
+  xs
 
 type AppMetaRaw =
   { "elm-version" :: ElmVersion
@@ -89,12 +89,18 @@ instance readForeignHasmapStringString :: JSON.ReadForeign Deps where
       keys <- Foreign.keys f
       deps <- for keys $ \key -> do
         ver <- Foreign.readString =<< Foreign.readProp key f
-        pure $ Dep { name: key, version: ver }
+        case Array.uncons $ String.split (Pattern "/") key of
+          Nothing ->
+            Foreign.fail $ ForeignError $ "Can't parse package name and author from the `" <> key <> "`"
+
+          Just { head:author, tail:tail } ->
+            let name = String.joinWith "/" tail
+            in pure $ Dep { author: author, name: name, version: ver }
 
       pure $ Deps deps
 
-getPackagePath :: Config -> ElmVersion -> PackageMeta -> FilePath
-getPackagePath config (ElmVersion version) package =
+getPackagePath :: Config -> ElmVersion -> Dep -> FilePath
+getPackagePath config (ElmVersion version) (Dep package) =
   Path.concat
       [ config.elmHome
       , version
@@ -108,6 +114,7 @@ getAppMeta :: Config -> Aff AppMetaRaw
 getAppMeta config = do
     elmJSON <- FS.readTextFile UTF8 $ config.path <> "/elm.json"
 
+    -- TODO: use `either` function
     case JSON.readJSON elmJSON of
       Right (r :: AppMetaRaw) -> do
         pure r
@@ -115,15 +122,17 @@ getAppMeta config = do
       Left e ->
         Aff.throwError $ Aff.error $ "Can't read elm.json file\n\n" <> show e
 
-getPackageJson :: Config -> AppMetaRaw -> Aff FilePath
-getPackageJson config appMeta =
-    FS.readTextFile UTF8 $
-        (getPackagePath config appMeta."elm-version"
-                        { author: "elm"
-                        , name: "core"
-                        , version: "1.0.5"
-                        }
-        ) <> "/elm.json"
+getPackageJson :: Config -> ElmVersion -> Dep -> Aff FilePath
+getPackageJson config elmVersion dep =
+    FS.readTextFile UTF8 $ packagePath <> "/elm.json"
+  where
+    packagePath =
+      getPackagePath config elmVersion dep
+
+getDeps :: Config -> ElmVersion -> Deps -> Aff (Array FilePath)
+getDeps config elmVersion deps =
+  for (unDeps deps) $
+        getPackageJson config elmVersion
 
 main :: Effect (Fiber Unit)
 main = do
@@ -134,12 +143,24 @@ main = do
     elmJSON <- FS.readTextFile UTF8 $ config.path <> "/elm.json"
 
     app <- getAppMeta config
-    liftEffect $ Console.log $ show app
-    file <- getPackageJson config app
+    let elmVersion = app."elm-version"
+    direct <- getDeps config elmVersion app.dependencies.direct
+    indirect <- getDeps config elmVersion app.dependencies.indirect
 
-    liftEffect $ case JSON.readJSON file of
-      Right (package :: Package) ->
-        Console.log $ show package
+    liftEffect $ Console.log "\nDIRECT:"
+    for_ direct $ \file ->
+        liftEffect $ case JSON.readJSON file of
+          Right (package :: Package) ->
+            Console.log $ show package
 
-      Left e ->
-        Console.log $ "err reading json: " <> show e
+          Left e ->
+            Console.log $ "err reading json: " <> show e
+
+    liftEffect $ Console.log "\nINDIRECT:"
+    for_ indirect $ \file ->
+        liftEffect $ case JSON.readJSON file of
+          Right (package :: Package) ->
+            Console.log $ show package
+
+          Left e ->
+            Console.log $ "err reading json: " <> show e
